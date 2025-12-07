@@ -1,7 +1,7 @@
 import os
 import logging
-from flask import Flask, request
 import requests
+from flask import Flask, request
 from openai import OpenAI
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -13,38 +13,67 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
-def send_message(chat_id, text):
+# ============ SEND TEXT ============
+def send_text(chat_id, text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     requests.post(url, json={"chat_id": chat_id, "text": text})
 
 
-def ask_gpt(prompt):
+# ============ SEND VOICE ============
+def send_voice(chat_id, ogg_data):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendVoice"
+    files = {"voice": ("voice.ogg", ogg_data)}
+    data = {"chat_id": chat_id}
+    requests.post(url, data=data, files=files)
+
+
+# ============ GENERATE VOICE ============
+def gpt_voice_answer(text):
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Ты — дружелюбный помощник. Общайся естественно и живо."
-                    )
-                },
-                {"role": "user", "content": prompt}
-            ]
+        result = client.audio.speech.create(
+            model="gpt-4o-mini-tts",
+            voice="alloy",
+            input=text,
+            format="opus"  # Telegram принимает .ogg (opus)
         )
-
-        # ⭐ Правильный, рабочий способ получить текст
-        answer = response.choices[0].message.content
-
-        return answer
-
+        return result.read()
     except Exception as e:
-        return f"Ошибка GPT: {e}"
+        return None
+
+
+# ============ GPT TEXT ANSWER ============
+def gpt_text_answer(prompt):
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "Ты дружелюбный ассистент."},
+            {"role": "user", "content": prompt}
+        ]
+    )
+    return response.choices[0].message.content
+
+
+# ============ GPT IMAGE ANALYSIS ============
+def gpt_image_answer(image_bytes):
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "Опиши изображение и помоги пользователю."},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "Что на изображении?"},
+                    {"type": "input_image", "image": image_bytes}
+                ]
+            }
+        ]
+    )
+    return response.choices[0].message.content
 
 
 @app.route("/", methods=["GET"])
 def home():
-    return "Bot is running!"
+    return "Bot running!"
 
 
 @app.route(f"/{BOT_TOKEN}", methods=["POST"])
@@ -52,19 +81,61 @@ def webhook():
     update = request.get_json()
     logging.info(update)
 
-    if "message" in update:
-        chat_id = update["message"]["chat"]["id"]
-        text = update["message"].get("text", "")
+    if "message" not in update:
+        return "OK"
 
-        reply = ask_gpt(text)
-        send_message(chat_id, reply)
+    msg = update["message"]
+    chat_id = msg["chat"]["id"]
 
-    return "OK", 200
+    # === TEXT MESSAGE ===
+    if "text" in msg:
+        text = msg["text"]
+
+        # 1. GPT text
+        answer = gpt_text_answer(text)
+
+        # 2. GPT voice
+        voice_data = gpt_voice_answer(answer)
+
+        if voice_data:
+            send_voice(chat_id, voice_data)
+        else:
+            send_text(chat_id, answer)
+
+        return "OK"
+
+    # === PHOTO MESSAGE ===
+    if "photo" in msg:
+        file_id = msg["photo"][-1]["file_id"]
+
+        file_info = requests.get(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}"
+        ).json()
+
+        file_path = file_info["result"]["file_path"]
+
+        image_file = requests.get(
+            f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+        ).content
+
+        answer = gpt_image_answer(image_file)
+
+        # Голосовой ответ
+        voice_data = gpt_voice_answer(answer)
+
+        if voice_data:
+            send_voice(chat_id, voice_data)
+        else:
+            send_text(chat_id, answer)
+
+        return "OK"
+
+    return "OK"
 
 
 if __name__ == "__main__":
     render_url = os.getenv("RENDER_URL")
     if render_url:
-        webhook_url = f"https://{render_url}/{BOT_TOKEN}"
-        requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={webhook_url}")
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url=https://{render_url}/{BOT_TOKEN}"
+        requests.get(url)
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
