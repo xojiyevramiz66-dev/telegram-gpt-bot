@@ -1,51 +1,42 @@
 import os
-import telebot
+import logging
 from flask import Flask, request
-from openai import OpenAI
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-RENDER_URL = os.getenv("RENDER_URL")
-
-bot = telebot.TeleBot(BOT_TOKEN)
-client = OpenAI(api_key=OPENAI_API_KEY)
+import requests
 
 app = Flask(__name__)
 
+BOT_TOKEN = "8202650249:AAEW3DusXW-yXjrvmtSoI6FhlAJifmo-_K8"
+TELEGRAM_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+
+logging.basicConfig(level=logging.INFO)
 
 @app.route("/", methods=["GET"])
 def home():
     return "Bot is running!"
 
-
 @app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def webhook():
-    json_data = request.get_json()
-    if json_data:
-        update = telebot.types.Update.de_json(json_data)
-        bot.process_new_updates([update])
-    return "OK", 200
+    data = request.get_json()
 
+    if not data:
+        return "no data"
 
-@bot.message_handler(content_types=["text"])
-def handle_message(message):
-    try:
-        # Новый синтаксис OpenAI
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "user", "content": message.text}
-            ]
-        )
+    logging.info(f"Incoming update: {data}")
 
-        answer = response.choices[0].message.content
-        bot.send_message(message.chat.id, answer)
+    if "message" in data:
+        chat_id = data["message"]["chat"]["id"]
+        text = data["message"].get("text", "")
 
-    except Exception as e:
-        bot.send_message(message.chat.id, f"Ошибка: {e}")
+        # Ответ бота
+        reply = f"Ты написал: {text}"
 
+        # Отправляем ответ
+        requests.post(TELEGRAM_URL, json={
+            "chat_id": chat_id,
+            "text": reply
+        })
+
+    return "ok"
 
 if __name__ == "__main__":
-    bot.remove_webhook()
-    bot.set_webhook(url=f"https://{RENDER_URL}/{BOT_TOKEN}")
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+    app.run(host="0.0.0.0", port=10000)
