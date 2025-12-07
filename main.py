@@ -1,53 +1,40 @@
-import os
-import requests
 from flask import Flask, request
+import telegram
 from openai import OpenAI
-
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 app = Flask(__name__)
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+TELEGRAM_TOKEN = "ТВОЙ_ТОКЕН"
+bot = telegram.Bot(token=TELEGRAM_TOKEN)
 
-
-def send_message(chat_id, text):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text
-    }
-    requests.post(url, json=payload)
-
+client = OpenAI(api_key="ТВОЙ_OPENAI_KEY")
 
 @app.route("/", methods=["POST"])
 def webhook():
-    data = request.get_json()
+    data = request.json
 
-    if "message" not in data:
-        return "ok"
+    if "message" in data:
+        chat_id = data["message"]["chat"]["id"]
+        text = data["message"].get("text", "")
 
-    chat_id = data["message"]["chat"]["id"]
-    user_text = data["message"].get("text", "")
+        # Отправляем запрос в OpenAI
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "user", "content": text}
+            ]
+        )
 
-    # GPT ответ
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "user", "content": user_text}
-        ]
-    )
+        # ПРАВИЛЬНЫЙ СПОСОБ!!!
+        answer = response.choices[0].message.content
 
-    answer = response.choices[0].message["content"]
-    send_message(chat_id, answer)
+        bot.send_message(chat_id=chat_id, text=answer)
 
-    return "ok"
-
+    return "OK"
 
 @app.route("/", methods=["GET"])
-def index():
-    return "Telegram GPT Bot is running!"
-
+def home():
+    return "Bot is running!"
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
