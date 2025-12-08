@@ -1,69 +1,44 @@
 import os
 import logging
-import json
-import threading
 from flask import Flask, request
 import requests
+import threading
+import time
 from openai import OpenAI
 
-TELEGRAM_TOKEN = os.getenv("BOT_TOKEN")
+# ----------------------------------------
+# CONFIG
+# ----------------------------------------
+TELEGRAM_TOKEN = "8202650249:AAEW3DusXW-yXjrvmtSoI6FhlAJifmo-_K8"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+# ВСТАВЬ СВОЙ ДОМЕН Render
+RENDER_URL = "YOUR_RENDER_URL_HERE"
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
-# ----- Настройки таймаутов -----
-TELEGRAM_REQUEST_TIMEOUT = 5  # seconds
-OPENAI_REQUEST_TIMEOUT = 20   # seconds
+user_mode = {}  # режим для каждого пользователя
 
-# ----- Соответствие надписей кнопок -> внутренний ключ режима -----
-LABEL_TO_MODE = {
-    "общение": "default",
-    "учёба": "student",
-    "учеба": "student",
-    "писатель": "writer",
-    "писатель́": "writer",
-    "переводчик": "translator",
-    "кодинг": "coder",
-    "код": "coder",
-    "эксперт": "expert",
-    "ассистент": "assistant",
-    "режимы": "modes",
-    "назад": "back"
-}
 
-# ---------- ОТПРАВКА СООБЩЕНИЙ ----------
+# ----------------------------------------
+# ОТПРАВКА СООБЩЕНИЙ
+# ----------------------------------------
 def send_message(chat_id, text, keyboard=None):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "HTML"
-    }
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
 
     if keyboard:
-        # Telegram принимает JSON-объект в reply_markup
         payload["reply_markup"] = keyboard
 
-    try:
-        requests.post(url, json=payload, timeout=TELEGRAM_REQUEST_TIMEOUT)
-    except Exception as e:
-        logging.exception("Ошибка при отправке сообщения в Telegram: %s", e)
+    requests.post(url, json=payload)
 
 
-def send_chat_action(chat_id, action="typing"):
-    """Показывает пользователю, что бот печатает."""
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendChatAction"
-    payload = {"chat_id": chat_id, "action": action}
-    try:
-        requests.post(url, json=payload, timeout=TELEGRAM_REQUEST_TIMEOUT)
-    except Exception:
-        pass
-
-
-# ---------- Клавиатуры ----------
+# ----------------------------------------
+# МЕНЮ
+# ----------------------------------------
 def main_menu():
     return {
         "keyboard": [
@@ -90,70 +65,44 @@ def modes_keyboard():
     }
 
 
-# ---------- РЕЖИМЫ (системные подсказки) ----------
+# ----------------------------------------
+# РЕЖИМЫ
+# ----------------------------------------
 MODES = {
-    "default": "Ты дружелюбный ассистент и ведёшь обычный разговор.",
-    "student": "Ты помогаешь с учёбой: объясняешь темы, решаешь задачи, даёшь простые объяснения.",
-    "writer": "Ты профессиональный копирайтер: создаёшь тексты, красиво формулируешь мысли.",
-    "translator": "Ты переводчик: переводишь текст, исправляешь ошибки и улучшаешь стиль.",
-    "coder": "Ты эксперт по программированию: объясняешь код, исправляешь баги, даёшь примеры.",
-    "expert": "Ты эксперт высокого уровня: даёшь точные, структурированные и профессиональные ответы.",
-    "assistant": "Ты персональный ассистент: планируешь, структурируешь задачи и помогаешь организовать дела."
+    "default": "Ты дружелюбный ассистент и ведёшь простой человеческий разговор.",
+    "student": "Ты помощник для учёбы: объясняешь материал простым языком.",
+    "writer": "Ты профессиональный копирайтер и создаёшь тексты высокого качества.",
+    "translator": "Ты переводчик: переводишь, исправляешь ошибки, улучшаешь стиль.",
+    "coder": "Ты эксперт программист: пишешь код, исправляешь баги, обучаешь.",
+    "expert": "Ты эксперт высокого уровня: даёшь чёткие, точные и структурированные ответы.",
+    "assistant": "Ты персональный ассистент: помогаешь планировать задачи и организовывать жизнь."
 }
 
-user_mode = {}  # режимы по chat_id
 
-
-# ---------- Вспом. функции ----------
-def normalize_label(text: str) -> str:
-    """Извлекает слово без эмодзи/регистра для поиска в LABEL_TO_MODE."""
-    if not text:
-        return ""
-    # убираем ведущие/замыкающие пробелы, переводим в lower
-    t = text.strip().lower()
-    # оставим только русские буквы и латиницу и пробелы (простая нормализация)
-    cleaned = []
-    for ch in t:
-        if ch.isalpha() or ch.isspace():
-            cleaned.append(ch)
-    return "".join(cleaned).strip()
-
-
-# ---------- GPT: запрос к OpenAI ----------
+# ----------------------------------------
+# GPT ОТВЕТ
+# ----------------------------------------
 def ask_gpt(user_id, prompt):
-    # сделаем короткий системный prompt для ускорения
     mode = user_mode.get(user_id, "default")
-    system_prompt = MODES.get(mode, MODES["default"])
-
-    # защита от слишком длинных пользовательских сообщений
-    if len(prompt) > 4000:
-        prompt = prompt[:4000] + "\n\n(сокращённый ввод...)"
+    system_prompt = MODES[mode]
 
     try:
-        # покажем действие typing
-        send_chat_action(user_id, action="typing")
-
         completion = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt}
-            ],
-            max_tokens=700,
-            temperature=0.25,
-            timeout=OPENAI_REQUEST_TIMEOUT  # если библиотека поддерживает
+            ]
         )
+        return completion.choices[0].message.content
 
-        # защищаемся на случай, если ответа нет
-        if completion and getattr(completion, "choices", None):
-            return completion.choices[0].message.content
-        return "Извините, я не смог обработать запрос."
     except Exception as e:
-        logging.exception("Ошибка при обращении к OpenAI: %s", e)
-        return "Ошибка сервиса GPT — попробуйте чуть позже."
+        return f"Ошибка GPT: {e}"
 
 
-# ---------- ТЕКСТ ПРИ /start ----------
+# ----------------------------------------
+# /start ТЕКСТ
+# ----------------------------------------
 def start_text():
     return (
         "<b>Привет! 👋</b>\n"
@@ -164,71 +113,79 @@ def start_text():
     )
 
 
-# ---------- ОБРАБОТКА WEBHOOK ----------
+# ----------------------------------------
+# FLASK
+# ----------------------------------------
 @app.route("/", methods=["GET"])
 def home():
     return "Bot is running!"
 
 
-def handle_message_async(chat_id, text):
-    """В отдельном потоке вызов GPT и отправка ответа."""
-    reply = ask_gpt(chat_id, text)
-    send_message(chat_id, reply)
-
-
 @app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def webhook():
     update = request.json
-    logging.info("Update: %s", update)
+    logging.info(update)
 
-    if "message" not in update:
-        return "OK", 200
+    if "message" in update:
+        message = update["message"]
+        chat_id = message["chat"]["id"]
+        text = message.get("text", "")
 
-    message = update["message"]
-    chat_id = message["chat"]["id"]
-    text = message.get("text", "")
+        # /start
+        if text == "/start":
+            user_mode[chat_id] = "default"
+            send_message(chat_id, start_text(), keyboard=main_menu())
+            return "OK"
 
-    # команда /start
-    if text == "/start":
-        user_mode[chat_id] = "default"
-        send_message(chat_id, start_text(), keyboard=main_menu())
-        return "OK", 200
-
-    # кнопка режимы (показываем клавиатуру)
-    if text == "🎭 Режимы" or text.lower() == "режимы":
-        send_message(chat_id, "Выбери нужный режим 👇", keyboard=modes_keyboard())
-        return "OK", 200
-
-    if text == "⬅️ Назад" or text.lower() == "назад":
-        send_message(chat_id, "Главное меню 👇", keyboard=main_menu())
-        return "OK", 200
-
-    # проверим, является ли это выбором режима через нормализацию
-    normalized = normalize_label(text)  # например "общение", "учёба"
-    if normalized in LABEL_TO_MODE:
-        mapped = LABEL_TO_MODE[normalized]
-        if mapped == "modes":
+        # Режимы
+        if text == "🎭 Режимы":
             send_message(chat_id, "Выбери режим 👇", keyboard=modes_keyboard())
-            return "OK", 200
-        if mapped == "back":
+            return "OK"
+
+        if text == "⬅️ Назад":
             send_message(chat_id, "Главное меню 👇", keyboard=main_menu())
-            return "OK", 200
-        # сохраняем выбранный режим
-        user_mode[chat_id] = mapped
-        pretty = text  # можно показывать исходную надпись
-        send_message(chat_id, f"Режим <b>{pretty}</b> включён!")
-        return "OK", 200
+            return "OK"
 
-    # если текст не распознан как режим — это обычный запрос к GPT
-    # запускаем в отдельном потоке, чтобы webhook быстро ответил Telegram (200)
-    thread = threading.Thread(target=handle_message_async, args=(chat_id, text), daemon=True)
-    thread.start()
+        # Переключение режимов
+        mode_map = {
+            "💬 Общение": "default",
+            "📚 Учёба": "student",
+            "✍️ Писатель": "writer",
+            "🔍 Переводчик": "translator",
+            "👨‍💻 Кодинг": "coder",
+            "🧠 Эксперт": "expert",
+            "📋 Ассистент": "assistant",
+        }
 
-    # Отвечаем Telegram, что получили update
+        if text in mode_map:
+            user_mode[chat_id] = mode_map[text]
+            send_message(chat_id, f"Режим <b>{text}</b> включён!")
+            return "OK"
+
+        # GPT
+        reply = ask_gpt(chat_id, text)
+        send_message(chat_id, reply)
+
     return "OK", 200
 
 
+# ----------------------------------------
+# KEEP-ALIVE (НЕ ДАЁТ РЕНДЕРУ УСНУТЬ)
+# ----------------------------------------
+def keep_alive():
+    while True:
+        try:
+            requests.get(RENDER_URL)
+        except:
+            pass
+        time.sleep(60)
+
+
+threading.Thread(target=keep_alive, daemon=True).start()
+
+
+# ----------------------------------------
+# RUN
+# ----------------------------------------
 if __name__ == "__main__":
-    # Для продакшна — запускай через gunicorn:
-    # gunicorn -w 4 -b 0.0.0.0:10000 webhook:app
     app.run(host="0.0.0.0", port=10000)
