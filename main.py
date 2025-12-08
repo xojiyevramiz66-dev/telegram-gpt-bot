@@ -1,9 +1,9 @@
 import os
 import logging
-import threading
 from flask import Flask, request
 import requests
 from openai import OpenAI
+import threading  # добавлено для фоновой обработки
 
 TELEGRAM_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -11,9 +11,10 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 app = Flask(__name__)
+
 logging.basicConfig(level=logging.INFO)
 
-# память – только предыдущее сообщение
+# хранение только предыдущего сообщения
 last_message = {}
 
 
@@ -23,7 +24,8 @@ def send_message(chat_id, text):
     requests.post(url, json=payload)
 
 
-def ask_gpt(chat_id, prompt):
+def process_gpt_answer(chat_id, prompt):
+    """ Генерация ответа GPT в отдельном потоке — БЫСТРО! """
     prev = last_message.get(chat_id, "")
 
     messages = [
@@ -31,27 +33,29 @@ def ask_gpt(chat_id, prompt):
         {"role": "user", "content": f"Предыдущее сообщение: {prev}"},
         {"role": "user", "content": f"Текущее сообщение: {prompt}"}
     ]
+
     try:
         completion = client.chat.completions.create(
-            model="gpt-4o-mini-fast",   # ⚡ ускоренная модель
-            messages=messages
+            model="gpt-4o-mini",   # ОЧЕНЬ БЫСТРАЯ модель
+            messages=messages,
+            max_tokens=500,
+            temperature=0.7
         )
+
         reply = completion.choices[0].message.content
 
-        # сохраняем текущее сообщение
+        # сохраняем последнее сообщение
         last_message[chat_id] = prompt
 
-        return reply
+        send_message(chat_id, reply)
+
     except Exception as e:
-        return f"Ошибка GPT: {e}"
+        send_message(chat_id, f"Ошибка GPT: {e}")
 
 
-# ————————————————————————————
-# 🔥 Функция обработчик в отдельном потоке
-# ————————————————————————————
-def process_message(chat_id, text):
-    reply = ask_gpt(chat_id, text)
-    send_message(chat_id, reply)
+@app.route("/", methods=["GET"])
+def home():
+    return "Bot is running!"
 
 
 @app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
@@ -63,19 +67,13 @@ def webhook():
         chat_id = update["message"]["chat"]["id"]
         text = update["message"].get("text", "")
 
-        # ⚡ моментальный ответ Telegram (реально мгновенный)
-        send_message(chat_id, "⌛ Подождите, думаю…")
+        # сразу отвечаем что бот думает → мгновенный отклик
+        send_message(chat_id, "⏳ Думаю...")
 
-        # обработка GPT в фоне
-        threading.Thread(target=process_message, args=(chat_id, text)).start()
+        # GPT обрабатываем в фоне → скорость +++
+        threading.Thread(target=process_gpt_answer, args=(chat_id, text)).start()
 
-    # НЕ ждём GPT — мгновенно отвечаем Telegram
     return "OK", 200
-
-
-@app.route("/", methods=["GET"])
-def home():
-    return "Bot is running!"
 
 
 if __name__ == "__main__":
