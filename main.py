@@ -4,14 +4,17 @@ from flask import Flask, request
 import requests
 from openai import OpenAI
 
-TELEGRAM_TOKEN = os.getenv("BOT_TOKEN")  # token from Render environment
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # OpenAI key from Render environment
+TELEGRAM_TOKEN = os.getenv("BOT_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 app = Flask(__name__)
 
 logging.basicConfig(level=logging.INFO)
+
+# хранение только предыдущего сообщения
+last_message = {}
 
 
 def send_message(chat_id, text):
@@ -20,16 +23,28 @@ def send_message(chat_id, text):
     requests.post(url, json=payload)
 
 
-def ask_gpt(prompt):
+def ask_gpt(chat_id, prompt):
+    # получаем предыдущее сообщение (если есть)
+    prev = last_message.get(chat_id, "")
+
+    # формируем мини-контекст
+    messages = [
+        {"role": "system", "content": "Ты умный и дружелюбный Telegram ассистент."},
+        {"role": "user", "content": f"Предыдущее сообщение: {prev}"},
+        {"role": "user", "content": f"Текущее сообщение: {prompt}"}
+    ]
+
     try:
         completion = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "Ты умный и дружелюбный Telegram ассистент."},
-                {"role": "user", "content": prompt}
-            ]
+            messages=messages
         )
-        return completion.choices[0].message.content
+        reply = completion.choices[0].message.content
+
+        # сохраняем текущее сообщение как предыдущее
+        last_message[chat_id] = prompt
+
+        return reply
     except Exception as e:
         return f"Ошибка GPT: {e}"
 
@@ -48,7 +63,7 @@ def webhook():
         chat_id = update["message"]["chat"]["id"]
         text = update["message"].get("text", "")
 
-        reply = ask_gpt(text)
+        reply = ask_gpt(chat_id, text)
         send_message(chat_id, reply)
 
     return "OK", 200
